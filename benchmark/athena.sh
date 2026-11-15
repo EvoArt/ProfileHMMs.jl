@@ -6,14 +6,16 @@
 #SBATCH --mem=12G
 #SBATCH --time=01:00:00
 # ProfileHMMs against nhmmer 3.4 (latest release) and nhmmer from HMMER's
-# h3-avx development branch (AVX2/AVX-512 kernels), at 1 and 4 threads.
+# develop branch (pre-release 3.5), at 1 and 4 threads.
 # Submit from a checkout: sbatch benchmark/athena.sh
-# Expects $TOOLS/bin/nhmmer (3.4) and $TOOLS/h3avx/bin/nhmmer.
+# Expects $TOOLS/bin/nhmmer (3.4) and $TOOLS/hmmer-develop/bin/nhmmer.
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:?}"
 TOOLS="${TOOLS:-$HOME/findrna-tools}"
 export PATH="$HOME/julia-1.12.7/bin:$PATH"
-export NHMMERS="3.4=$TOOLS/bin/nhmmer,h3-avx=$TOOLS/h3avx/bin/nhmmer"
+# h3-avx (AVX2/AVX-512 branch, commit 2791783) builds but its nhmmer segfaults on
+# every input, so the newest working code is develop (3221e22, "HMMER 3.5").
+export NHMMERS="3.4=$TOOLS/bin/nhmmer,3.5-dev=$TOOLS/hmmer-develop/bin/nhmmer"
 export BENCH_REPEATS=3
 data=benchmark/data; mkdir -p "$data"
 # barrnap 0.9's bacterial rRNA profiles (Rfam 16S, 23S, 5S)
