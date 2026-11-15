@@ -25,7 +25,7 @@ function msv_score(hmm::Plan7HMM, xs)
     @inbounds for x in xs
         entry = n + hmm.nj_exit + hmm.t_bm
         curr[1] = entry + (x == 0 ? hmm.null1 : hmm.vit_match[1,x])
-        for k in 2:M
+        @simd for k in 2:M
             emission = x == 0 ? hmm.null1 : hmm.vit_match[k,x]
             curr[k] = min(prev[k-1], entry) + emission
         end
@@ -34,6 +34,14 @@ function msv_score(hmm::Plan7HMM, xs)
         prev, curr = curr, prev
     end
     Float64(c + hmm.nj_exit)
+end
+
+# The null model includes the geometric length probability as well as base
+# emissions. Omitting this term penalises short RNAs in long search windows.
+function _null_score(hmm::Plan7HMM, len)
+    len >= 0 || throw(ArgumentError("sequence length must be nonnegative"))
+    length_cost = len == 0 ? 0.0 : log1p(len) + len * log1p(1.0 / len)
+    len * hmm.null1_f + length_cost
 end
 
 function _tail_probability(bits, stats)
@@ -46,7 +54,7 @@ end
 "Approximate MSV E-value using bit-score calibration and an explicit search count."
 function msv_evalue(hmm::Plan7HMM, raw, len; db_size=1)
     db_size >= 1 || throw(ArgumentError("db_size must be at least one"))
-    bits = (len * hmm.null1_f - raw) / log(2.0)
+    bits = (_null_score(hmm,len) - raw) / log(2.0)
     db_size * _tail_probability(bits, hmm.stats_msv)
 end
 
@@ -108,6 +116,6 @@ function viterbi_score(hmm::Plan7HMM, xs)
         sm,tm = tm,sm; si,ti = ti,si; sd,td = td,sd
     end
     raw = Float64(c + hmm.nj_exit)
-    bits = (length(xs) * hmm.null1_f - raw) / log(2.0)
+    bits = (_null_score(hmm,length(xs)) - raw) / log(2.0)
     ViterbiResult(raw, bits, Tuple{Int,Symbol}[], firstpos, lastpos)
 end

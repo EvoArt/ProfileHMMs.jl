@@ -66,6 +66,10 @@ end
     @test isfinite(msv_score(h, zeros(UInt8,10)))
     @test msv_evalue(h, 1000.0, 10) > 0.9
     @test msv_evalue(h, 0.0, 100; db_size=10) ≈ 10msv_evalue(h,0.0,100)
+    # Independent probability calculation for the geometric null length model.
+    L = 20; p_continue = L/(L+1)
+    null = L*log(4) - log(p_continue^L * (1-p_continue))
+    @test ProfileHMMs._null_score(h,L) ≈ null atol=1e-6
 end
 
 @testset "Parser rejects bad inputs" begin
