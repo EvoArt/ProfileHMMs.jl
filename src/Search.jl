@@ -71,13 +71,31 @@ function _merge_hits(hits; reciprocal_overlap=0.5)
     sort!(kept; by=h -> (h.target_name, h.target_start, h.strand, h.query_name))
 end
 
+function _window_starts(L, window, overlap)
+    L == 0 && return Int[]
+    L <= window && return [1]
+    starts = collect(1:(window-overlap):(L-window+1))
+    starts[end] != L-window+1 && push!(starts,L-window+1)
+    starts
+end
+
 "Scan a FASTA in overlapping windows; each window owns its results, safe across thread pools."
 function scan_fasta(hmm::Plan7HMM, fasta; window=max(5000, 3hmm.M),
         overlap=max(2000, 2hmm.M), progress::Bool=_progress_default(), io::IO=stderr,
         threaded::Bool=true, kwargs...)
     window > 0 && 0 <= overlap < window || throw(ArgumentError("require window > overlap >= 0"))
     all_hits = SearchHit[]
-    bar = _progress(0, "Searching"; unit="windows", enabled=progress, io=io)
+    # Count windows only when displaying progress, so interactive sessions get
+    # a bounded bar and ETA while batch/CI calls avoid the extra sequential read.
+    total = 0
+    if progress
+        open(FASTA.Reader, fasta) do reader
+            for record in reader
+                total += length(_window_starts(length(sequence(record)),window,overlap))
+            end
+        end
+    end
+    bar = _progress(total, "Searching"; unit="windows", enabled=progress, io=io)
     ok = false
     seen = Set{String}()
     try
@@ -88,8 +106,7 @@ function scan_fasta(hmm::Plan7HMM, fasta; window=max(5000, 3hmm.M),
                 name in seen && throw(ArgumentError("duplicate FASTA identifier: $name"))
                 push!(seen,name)
                 L == 0 && continue
-                starts = L <= window ? [1] : collect(1:(window-overlap):(L-window+1))
-                L > window && starts[end] != L-window+1 && push!(starts,L-window+1)
+                starts = _window_starts(L,window,overlap)
                 chunks = Vector{Vector{SearchHit}}(undef,length(starts))
                 function work(wi)
                     a = starts[wi]; b = min(a+window-1,L)
@@ -110,7 +127,7 @@ function scan_fasta(hmm::Plan7HMM, fasta; window=max(5000, 3hmm.M),
         end
         ok = true
     finally
-        _finish!(bar; ok=ok, info="$(length(all_hits)) hits")
+        _finish!(bar; ok=ok, info="$(hmm.name) · $(length(all_hits)) hits")
     end
     sort!(all_hits; by=h -> (h.target_name,h.target_start,h.strand))
 end

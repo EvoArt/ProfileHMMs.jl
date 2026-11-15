@@ -99,6 +99,8 @@ end
         @test occursin("Searching",shown)
         @test !occursin('\e',shown)
         @test count(==('\n'),shown) == 1
+        @test occursin("1/1 windows",shown)
+        @test occursin("toy",shown)
     end
     @test !occursin('\e',sprint(show,MIME"text/plain"(),h))
 end
