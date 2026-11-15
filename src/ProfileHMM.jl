@@ -3,6 +3,46 @@
 # insert-state composition cannot reward biased target composition, and local
 # entry into match state k is weighted by the occupancy of k.
 
+# SIMD width (Float32 lanes) of the striped Viterbi kernel.
+const _FW = 8
+
+# Striped layout (Farrar 2007, as in HMMER): state k lives in vector
+# q = (k-1) % Q, lane l = (k-1) ÷ Q. State k-1 is then in vector q-1 of the
+# same lane, except for q = 0, which needs the last vector shifted by a lane.
+struct _VitProfile
+    Q::Int
+    msc::Vector{Float32}     # 5 blocks of Q*_FW: emission by base (5 = ambiguous, 0)
+    tbm::Vector{Float32}     # B → M_k
+    tmm::Vector{Float32}     # M_{k-1} → M_k
+    tim::Vector{Float32}     # I_{k-1} → M_k
+    tdm::Vector{Float32}     # D_{k-1} → M_k
+    tmi::Vector{Float32}     # M_k → I_k
+    tii::Vector{Float32}     # I_k → I_k
+    tmd::Vector{Float32}     # M_k → D_{k+1}
+    tdd::Vector{Float32}     # D_k → D_{k+1}
+end
+
+@inline _stripe(k, Q) = ((k - 1) % Q) * _FW + (k - 1) ÷ Q + 1
+
+function _vitprofile(M, msc, tbm, tmm, tim, tdm, tmi, tii, tmd, tdd)
+    Q = cld(M, _FW); n = Q * _FW
+    function s(v)        # padding states k > M are unreachable (-Inf transitions)
+        a = fill(-Inf32, n)
+        for k in 1:M
+            a[_stripe(k, Q)] = v[k]
+        end
+        a
+    end
+    # Plan7 has no states beyond node M: in the striped layout a transition out
+    # of node M would feed a padding lane, so remove it (the files may give one).
+    tmd, tdd, tmi, tii = (setindex!(copy(v), -Inf32, M) for v in (tmd, tdd, tmi, tii))
+    e = zeros(Float32, 5n)
+    for b in 1:5, k in 1:M
+        e[(b-1)*n+_stripe(k, Q)] = msc[k, b]
+    end
+    _VitProfile(Q, e, s(tbm), s(tmm), s(tim), s(tdm), s(tmi), s(tii), s(tmd), s(tdd))
+end
+
 """
     Plan7HMM
 
@@ -25,6 +65,7 @@ struct Plan7HMM
     stats_msv::Tuple{Float64,Float64}
     stats_viterbi::Tuple{Float64,Float64}
     stats_forward::Tuple{Float64,Float64}
+    vp::_VitProfile             # the same scores, striped for the SIMD Viterbi
 end
 
 "Map a nucleotide to 1-4 (A, C, G, T/U); 0 for an ambiguous base."
@@ -72,7 +113,9 @@ function build_plan7(profile::HMMProfile)
     Z = sum(occ[k] * (M - k + 1) for k in 1:M)
     tbm = Float32.(log.(occ ./ Z))
     maxl = profile.maxl > 0 ? profile.maxl : 2M
-    Plan7HMM(profile.name, M, maxl, msc, into(1), into(4), into(6),
-             out(2), out(5), out(3), out(7), tbm,
-             profile.stats_msv, profile.stats_viterbi, profile.stats_forward)
+    tmm, tim, tdm = into(1), into(4), into(6)
+    tmi, tii, tmd, tdd = out(2), out(5), out(3), out(7)
+    Plan7HMM(profile.name, M, maxl, msc, tmm, tim, tdm, tmi, tii, tmd, tdd, tbm,
+             profile.stats_msv, profile.stats_viterbi, profile.stats_forward,
+             _vitprofile(M, msc, tbm, tmm, tim, tdm, tmi, tii, tmd, tdd))
 end

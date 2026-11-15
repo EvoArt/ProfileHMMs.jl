@@ -17,6 +17,7 @@
         println(io, ">s\n", "NNNN", cons, "NNNN"); close(io)
         scan_fasta(h, path; progress=false, evalue_threshold=1.0)
         scan_fasta([h], path; progress=true, io=IOBuffer(), evalue_threshold=1.0)
+        scan_fasta(h, path; progress=false, evalue_threshold=1.0, scoring=:forward)
         rm(path; force=true)
         sprint(show, MIME"text/plain"(), h)
     end

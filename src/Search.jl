@@ -1,9 +1,18 @@
 # Search pipeline, after nhmmer: an ungapped SSV pass over each strand finds
 # seeds; windows around the seeds (one model length plus room for insertions
 # either side) are scored with local Viterbi; the flanks of each accepted
-# alignment are searched again so that nearby copies are not lost.
+# alignment are searched again so that nearby copies are not lost. With
+# `scoring=:forward`, accepted alignments are rescored as nhmmer does
+# (Forward score, null2 bias correction, Forward-calibrated E-values).
 
-"A nucleotide profile hit. Coordinates are 1-based inclusive on the original strand."
+"""
+    SearchHit
+
+A profile hit. `target_start:target_end` are 1-based inclusive coordinates on
+the input sequence (on `strand` `'+'` or `'-'`); `model_start:model_end` are the
+aligned profile states. `bias` is the composition-bias correction subtracted
+from `bit_score` (bits; 0 with `scoring=:viterbi`, which does not compute it).
+"""
 struct SearchHit
     target_name::String
     target_desc::String
@@ -14,6 +23,9 @@ struct SearchHit
     bit_score::Float64
     evalue::Float64
     seq_length::Int
+    model_start::Int
+    model_end::Int
+    bias::Float64
 end
 Base.show(io::IO, h::SearchHit) = print(io, "SearchHit(", h.query_name, ", ",
     h.target_name, ":", h.target_start, "-", h.target_end, "(", h.strand, "))")
@@ -26,11 +38,19 @@ function viterbi_pvalue(hmm::Plan7HMM, bits)
     -expm1(-exp(-lambda * (bits - mu)))
 end
 
+"Forward P-value of a bit score (exponential tail, the profile's calibration), as nhmmer."
+function forward_pvalue(hmm::Plan7HMM, bits)
+    tau, lambda = hmm.stats_forward
+    isfinite(tau) && isfinite(lambda) && lambda > 0 ||
+        throw(ArgumentError("profile $(hmm.name) lacks Forward calibration statistics"))
+    bits <= tau ? 1.0 : exp(-lambda * (bits - tau))
+end
+
 """
     search_space(hmm, residues)
 
 E-value multiplier for a search of `residues` bases on both strands: the number
-of non-overlapping windows of the profile's maximum alignment length, as nhmmer.
+of windows of the profile's maximum alignment length, as nhmmer.
 """
 search_space(hmm::Plan7HMM, residues) = max(1.0, 2residues / hmm.maxl)
 
@@ -55,20 +75,39 @@ function _windows(hmm, seeds, L)
     out
 end
 
+const _WindowHit = NamedTuple{(:a, :b, :bits, :pvalue, :ka, :kb, :bias),
+                              Tuple{Int,Int,Float64,Float64,Int,Int,Float64}}
+
+# nhmmer's Viterbi filter threshold (per window P-value) before Forward rescoring.
+const _F2 = 3e-3
+
 # Best alignment in xs[lo:hi]; accept it, then search flanks that hold seeds.
-function _search_window!(hits, hmm, xs, lo, hi, rs, cutoff, min_length, buf)
+function _search_window!(hits, hmm, xs, lo, hi, rs, cutoff, min_length, buf, op)
     stack = [(lo, hi)]
     while !isempty(stack)
         a0, b0 = pop!(stack)
-        any(r -> a0 <= r <= b0, rs) || continue
+        nseed = count(r -> a0 <= r <= b0, rs)
+        nseed > 0 || continue
         w = view(xs, a0:b0)
-        # Score-only pass first; only accepted windows pay for endpoint tracking.
-        bits = _viterbi_bits(hmm, w, buf)
-        bits > 0 && viterbi_pvalue(hmm, bits) <= cutoff || continue
+        pass = op === nothing ? cutoff : max(cutoff, _F2)
+        # A window with a single seed is usually chance: filter it with the
+        # cheaper score-only pass. Real genes give many seeds; trace them at once.
+        if nseed < 3
+            bits = _viterbi_bits(hmm, w, buf)
+            bits > 0 && viterbi_pvalue(hmm, bits) <= pass || continue
+        end
         v = _viterbi(hmm, w, buf)
-        v.target_start > 0 || continue
+        v.target_start > 0 && v.bit_score > 0 && viterbi_pvalue(hmm, v.bit_score) <= pass || continue
         a = a0 + v.target_start - 1; b = a0 + v.target_end - 1
-        b - a + 1 >= min_length && push!(hits, (a, b, v.bit_score))
+        if op === nothing
+            h = _WindowHit((a, b, v.bit_score, viterbi_pvalue(hmm, v.bit_score), v.model_start, v.model_end, 0.0))
+        else
+            f = _nhmmer_score(hmm, op, xs, a, b, true)
+            p = forward_pvalue(hmm, f.bit_score)
+            p <= cutoff || continue
+            h = _WindowHit((a, b, f.bit_score, p, v.model_start, v.model_end, f.bias / log(2)))
+        end
+        b - a + 1 >= min_length && push!(hits, h)
         a > a0 && push!(stack, (a0, a - 1))
         b < b0 && push!(stack, (b + 1, b0))
     end
@@ -99,7 +138,7 @@ function _run(f, jobs, threaded)
 end
 
 # Search a batch of records with every model; return hits (unfiltered by E).
-function _search_batch(hmms, ssvs, records, cutoffs, min_length, threaded, bar)
+function _search_batch(hmms, ssvs, ops, records, cutoffs, min_length, threaded, bar)
     strands = [(ri, s) for ri in eachindex(records) for s in ('+', '-')]
     xs = _run(((ri, s),) -> _strand_indices(records[ri], s), strands, threaded)
     idx = Dict(strands[i] => xs[i] for i in eachindex(strands))
@@ -117,20 +156,16 @@ function _search_batch(hmms, ssvs, records, cutoffs, min_length, threaded, bar)
     wjobs = [(mi, ri, s, w) for ((mi, ri, s), sl) in seeds
              for w in _windows(hmms[mi], sl, length(records[ri].seq))]
     found = _run(wjobs, threaded) do (mi, ri, s, (lo, hi, rs))
-        _search_window!(Tuple{Int,Int,Float64}[], hmms[mi], idx[(ri, s)], lo, hi, rs,
-                        cutoffs[mi], min_length, _ViterbiBuffer(hmms[mi].M))
+        _search_window!(_WindowHit[], hmms[mi], idx[(ri, s)], lo, hi, rs,
+                        cutoffs[mi], min_length, _ViterbiBuffer(hmms[mi]), ops[mi])
     end
-    hits = Tuple{Int,Int,Char,Int,Int,Float64}[]
-    for ((mi, ri, s, _), fs) in zip(wjobs, found), (a, b, bits) in fs
-        push!(hits, (mi, ri, s, a, b, bits))
-    end
-    hits
+    [(mi, ri, s, h) for ((mi, ri, s, _), fs) in zip(wjobs, found) for h in fs]
 end
 
-function _hit(hmm, rec, s, a, b, bits, Z)
+function _hit(hmm, rec, s, h::_WindowHit, Z)
     L = length(rec.seq)
-    start, stop = s == '+' ? (a, b) : (L - b + 1, L - a + 1)
-    SearchHit(rec.name, rec.desc, hmm.name, start, stop, s, bits, Z * viterbi_pvalue(hmm, bits), L)
+    start, stop = s == '+' ? (h.a, h.b) : (L - h.b + 1, L - h.a + 1)
+    SearchHit(rec.name, rec.desc, hmm.name, start, stop, s, h.bits, Z * h.pvalue, L, h.ka, h.kb, h.bias)
 end
 
 _hitorder(h) = (h.target_name, h.target_start, h.strand, h.query_name)
@@ -147,7 +182,8 @@ end
 
 function _scan(hmms, records; evalue_threshold=1e-5, seed_bits=default_seed_bits,
                db_size=nothing, min_length=1, threaded=true, bar=_progress(0, ""; enabled=false),
-               batch=32_000_000)
+               batch=32_000_000, scoring::Symbol=:viterbi)
+    scoring in (:viterbi, :forward) || throw(ArgumentError("scoring must be :viterbi or :forward"))
     evalue_threshold > 0 || throw(ArgumentError("evalue_threshold must be positive"))
     min_length >= 1 || throw(ArgumentError("min_length must be positive"))
     db_size === nothing || db_size >= 1 || throw(ArgumentError("db_size must be at least one"))
@@ -155,6 +191,7 @@ function _scan(hmms, records; evalue_threshold=1e-5, seed_bits=default_seed_bits
     Zs = [db_size === nothing ? search_space(h, nres) : Float64(db_size) for h in hmms]
     cutoffs = evalue_threshold ./ Zs
     ssvs = [_SSVProfile(h, seed_bits isa Real ? seed_bits : seed_bits(h)) for h in hmms]
+    ops = Union{Nothing,_OddsProfile}[scoring == :forward ? _OddsProfile(h) : nothing for h in hmms]
     hits = SearchHit[]
     i = 1
     while i <= length(records)       # batches bound the memory held as indices
@@ -163,8 +200,8 @@ function _scan(hmms, records; evalue_threshold=1e-5, seed_bits=default_seed_bits
             n += length(records[j].seq); j += 1
         end
         part = records[i:j-1]
-        for (mi, ri, s, a, b, bits) in _search_batch(hmms, ssvs, part, cutoffs, min_length, threaded, bar)
-            push!(hits, _hit(hmms[mi], part[ri], s, a, b, bits, Zs[mi]))
+        for (mi, ri, s, h) in _search_batch(hmms, ssvs, ops, part, cutoffs, min_length, threaded, bar)
+            push!(hits, _hit(hmms[mi], part[ri], s, h, Zs[mi]))
         end
         i = j
     end
@@ -193,8 +230,13 @@ Search both strands of every sequence in `fasta` with one profile or a vector
 of profiles. Returns `SearchHit`s sorted by sequence, position and strand.
 
 - `evalue_threshold`: report hits with E-value at most this. E-values are
-  Viterbi P-values times [`search_space`](@ref) of the whole file, unless
+  P-values times [`search_space`](@ref) of the whole file (as nhmmer), unless
   `db_size` fixes the multiplier.
+- `scoring`: `:viterbi` (default) reports the best alignment's Viterbi score.
+  `:forward` also rescores each alignment as nhmmer does — Forward score, null2
+  composition-bias correction (`bias`), normalisation to a MAXL window and
+  Forward-calibrated P-values — so that scores and E-values are comparable
+  with nhmmer's. It costs a Forward and a Backward pass per hit.
 - `seed_bits`: SSV seed threshold in bits, a number or a function of the profile.
   Lower values trade speed for sensitivity to weak, gapped hits.
 - `threaded`: use all Julia threads.
