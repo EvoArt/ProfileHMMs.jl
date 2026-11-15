@@ -2,3 +2,5 @@ Manifest.toml
 *.cov
 *.mem
 .DS_Store
+benchmark/data/
+benchmark/results/
