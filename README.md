@@ -46,6 +46,40 @@ Searches use all Julia threads (`threaded=false` to disable). In interactive
 sessions a progress bar is shown on `stderr` (`progress=false`, or
 `ProfileHMMs.setprogress!(false)` for every call).
 
+## Speed compared with nhmmer
+
+Searching a whole bacterial genome (both strands) with three rRNA profiles
+(16S, 23S, 5S; barrnap 0.9's `bac.hmm`), E-value ≤ 1e-5, on one Intel
+Skylake-AVX512 node. Seconds, median of three runs; ProfileHMMs after a
+warm-up call.
+
+| genome (size) | threads | ProfileHMMs | ProfileHMMs `scoring=:forward` | nhmmer 3.4 | nhmmer 3.5-dev |
+|---|---|---|---|---|---|
+| CP148752.1 (6.8 Mb) | 1 | 1.46 | 1.71 | 10.4 | 10.5 |
+| CP148752.1 (6.8 Mb) | 4 | 0.86 | 0.89 | 4.48 | 4.66 |
+| NZ_JBBHKP010000001.1 (3.7 Mb) | 1 | 0.82 | 0.92 | 4.61 | 4.73 |
+| NZ_JBBHKP010000001.1 (3.7 Mb) | 4 | 0.44 | 0.46 | 2.13 | 2.44 |
+
+All five genomes, the exact commands and versions are in
+[benchmark/results.md](benchmark/results.md). nhmmer 3.4 is the latest
+release; 3.5-dev is HMMER's development branch. On every genome both tools
+report the same hits (69 in all), with endpoints within 6 bases.
+
+Why it is faster, and what that costs:
+
+- **Wider vectors.** HMMER's x86 nhmmer uses 128-bit SSE (its experimental
+  AVX branch's nhmmer crashes), while ProfileHMMs uses 512-bit vectors for the
+  seed scan where available. The instructions are the same kind; Julia
+  compiles through LLVM, as clang does.
+- **A stricter first filter.** nhmmer's first stage passes on ~2–3% of the
+  sequence to its later stages, to catch weak, divergent hits; ProfileHMMs'
+  seed threshold passes on ~0.2% (16S, 23S) to 0.7% (5S). Most of the gap comes
+  from this. On these genomes nothing is lost, but for highly divergent or
+  fragmentary matches nhmmer may be more sensitive; lower `seed_bits` to move
+  ProfileHMMs towards nhmmer's sensitivity, at some cost in speed.
+- **Less work per hit.** nhmmer also runs posterior decoding and an
+  optimal-accuracy alignment for every hit.
+
 ## How it compares with HMMER
 
 On five bacterial genomes searched with the bacterial rRNA profiles, the hits
