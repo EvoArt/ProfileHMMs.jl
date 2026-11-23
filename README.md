@@ -1,8 +1,11 @@
 # ProfileHMMs.jl
 
+[![CI](https://github.com/EvoArt/ProfileHMMs.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/EvoArt/ProfileHMMs.jl/actions/workflows/CI.yml?query=branch%3Amain)
+[![Coverage](https://codecov.io/gh/EvoArt/ProfileHMMs.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/EvoArt/ProfileHMMs.jl)
+
 Search DNA sequences with HMMER3 nucleotide profile HMMs, in native Julia.
 No HMMER executables are needed, so it runs the same on Windows, macOS and
-Linux. [FindRNA.jl](https://github.com/EvoArt/FindRNA.jl) builds an rRNA
+Linux. [RibosomalRNAFinder.jl](https://github.com/EvoArt/RibosomalRNAFinder.jl) builds an rRNA
 finder on it.
 
 ```julia
