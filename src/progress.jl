@@ -90,14 +90,6 @@ function _update!(p::_Progress, count::Integer; info=nothing)
 end
 
 "Set the trailing text of `p` without advancing it."
-function _info!(p::_Progress, info::AbstractString)
-    p.enabled || return p
-    lock(p.lock) do
-        p.info = info
-        _maybe_render(p)
-    end
-    return p
-end
 
 "Close `p`, leaving its final line (with `info`) on the screen."
 function _finish!(p::_Progress; info=nothing, ok::Bool=true)
@@ -110,26 +102,6 @@ function _finish!(p::_Progress; info=nothing, ok::Bool=true)
         println(p.io)
     end
     return p
-end
-
-"""
-    _progress_println(p, msg)
-
-Write a line of `verbose` output above a running bar, so the two do not
-end up on the same line.
-"""
-function _progress_println(p::Union{Nothing,_Progress}, msg)
-    if p === nothing || !p.enabled || !p.tty || p.done
-        println(msg)
-        return
-    end
-    lock(p.lock) do
-        print(p.io, "\r\e[2K")
-        flush(p.io)
-        println(msg)
-        flush(stdout)
-        _render(p)
-    end
 end
 
 function _maybe_render(p::_Progress)

@@ -5,7 +5,6 @@ Parse HMMER3 profile HMM files (.hmm) into structured Julia types.
 Supports multi-model files (e.g. barrnap's 16S + 23S + 5S).
 """
 
-
 """
     HMMProfile
 

@@ -225,6 +225,119 @@ end
     end
 end
 
+# Write an HMMProfile in HMMER3 text format (values as -log probabilities, "*" for
+# zero probability), the inverse of parse_hmm_file.
+function write_hmmer3(io, h; terminator=true)
+    f(x) = isinf(x) ? "*" : string(round(x; digits=5))
+    println(io, "HMMER3/f [3.1b2 | February 2015]")
+    println(io, "NAME  ", h.name)
+    isempty(h.acc) || println(io, "ACC   ", h.acc)
+    println(io, "DESC  ", h.desc)
+    println(io, "LENG  ", h.length)
+    println(io, "MAXL  ", h.maxl)
+    println(io, "ALPH  ", h.alphabet)
+    println(io, "NSEQ  ", h.nseq)
+    println(io, "EFFN  ", h.effn)
+    println(io, "STATS LOCAL MSV       ", h.stats_msv[1], "  ", h.stats_msv[2])
+    println(io, "STATS LOCAL VITERBI   ", h.stats_viterbi[1], "  ", h.stats_viterbi[2])
+    println(io, "STATS LOCAL FORWARD   ", h.stats_forward[1], "  ", h.stats_forward[2])
+    println(io, "HMM          A        C        G        T")
+    println(io, "            m->m     m->i     m->d     i->m     i->i     d->m     d->d")
+    println(io, "  COMPO   ", join(f.(h.compo), "  "))
+    println(io, "          ", join(f.(h.insert_emissions[:, 1]), "  "))
+    println(io, "          ", join(f.(h.transitions[:, 1]), "  "))
+    for k in 1:h.length
+        println(io, "      $k   ", join(f.(h.match_emissions[:, k]), "  "), "  $k a - - -")
+        println(io, "          ", join(f.(h.insert_emissions[:, k+1]), "  "))
+        println(io, "          ", join(f.(h.transitions[:, k+1]), "  "))
+    end
+    terminator && println(io, "//")
+end
+
+@testset "HMMER3 files" begin
+    a = toy_profile()
+    b = toy_profile("TTGACCA")
+    b = HMMProfile("other", "RF00001", b.desc, b.length, b.maxl, "RNA", 3, 2.5, (-9.0, 0.71),
+                   (-9.5, 0.72), (-4.0, 0.73), b.compo, b.match_emissions, b.insert_emissions,
+                   b.transitions)
+    b.transitions[5, end] = Inf                               # a "*" entry
+    mktempdir() do dir
+        path = joinpath(dir, "two.hmm")
+        open(path, "w") do io
+            println(io, "# leading comment")
+            write_hmmer3(io, a); write_hmmer3(io, b)
+        end
+        ps = parse_hmm_file(path)
+        @test [p.name for p in ps] == ["toy", "other"]
+        @test ps[2].acc == "RF00001" && ps[2].alphabet == "RNA" && ps[2].nseq == 3 && ps[2].effn == 2.5
+        @test ps[2].stats_msv == (-9.0, 0.71) && ps[2].stats_viterbi == (-9.5, 0.72)
+        @test ps[2].stats_forward == (-4.0, 0.73)
+        for (p, q) in zip(ps, (a, b))
+            @test p.length == q.length && p.maxl == q.maxl
+            @test all(isapprox.(p.match_emissions, q.match_emissions; atol=1e-5))
+            @test all(isapprox.(p.insert_emissions, q.insert_emissions; atol=1e-5))
+            @test isequal(round.(p.transitions; digits=5), round.(q.transitions; digits=5))
+            @test all(isapprox.(p.compo, q.compo; atol=1e-5))
+        end
+        @test P.parse_hmm_value("*") == Inf && P.parse_hmm_value("0.5") == 0.5
+        @test sprint(show, ps[1]) == "HMMProfile(\"toy\", M=12, alphabet=DNA)"
+        @test occursin("HMMProfile", sprint(show, MIME"text/plain"(), ps[1]))
+        # a parsed profile searches like the one it was written from
+        seq = "NNNACGTTGCAAGGTNNNNNNNNNNNNNNNNNNNN"
+        fa = joinpath(dir, "q.fa")
+        write(fa, ">q\n$seq\n")
+        hits = nhmmscan(path, fa; models=["toy"], evalue_threshold=1.0, min_length=10, progress=false)
+        @test length(hits) == 1 && only(hits).query_name == "toy"
+        @test only(hits).target_start == 4
+        both = nhmmscan(path, fa; evalue_threshold=1.0, min_length=5, progress=false)
+        @test "toy" in [h.query_name for h in both]
+        @test_throws ArgumentError nhmmscan(path, fa; models="toy")
+        @test_throws ArgumentError nhmmscan(path, fa; models=["nope"])
+        # malformed files
+        bad(f) = (q = joinpath(dir, "bad.hmm"); open(f, q, "w"); q)
+        @test_throws ArgumentError parse_hmm_file(bad(io -> write_hmmer3(io, a; terminator=false)))
+        @test_throws ArgumentError parse_hmm_file(bad(io -> write_hmmer3(io,
+            HMMProfile("p", "", "", a.length, a.maxl, "amino", 1, 1.0, a.stats_msv, a.stats_viterbi,
+                       a.stats_forward, a.compo, a.match_emissions, a.insert_emissions, a.transitions))))
+        @test_throws ArgumentError parse_hmm_file(bad(io -> print(io, "HMMER3/f\nNAME x\nLENG 0\nALPH DNA\nHMM\nm->m\n")))
+        @test_throws ArgumentError parse_hmm_file(bad(io -> print(io, "HMMER3/f\nNAME x\nLENG 5\nALPH DNA\nHMM\nm->m\nCOMPO 1 1 1 1\n")))
+    end
+end
+
+@testset "displays, progress bars and long inputs" begin
+    h = build_plan7(toy_profile())
+    @test sprint(show, h) == "Plan7HMM(\"toy\", 12 states)"
+    hit = SearchHit("chr1", "", "toy", 4, 15, '+', 30.5, 1e-6, 100, 1, 12, 0.4)
+    @test sprint(show, hit) == "SearchHit(toy, chr1:4-15(+))"
+    s = sprint(show, MIME"text/plain"(), hit; context=:color => true)
+    @test occursin("\e[", s) && occursin("bias", s) && occursin("chr1", s)
+    @test P._ssv_jobs(10, 3; chunk=4) == [(1, 7, 4), (5, 10, 4), (9, 10, 2)]
+    P.setprogress!(true); @test P._progress_default()
+    P.setprogress!(false); @test !P._progress_default()
+    P._PROGRESS[] = nothing
+    withenv("CI" => "true") do
+        @test !P._progress_default()
+    end
+    for n in (5, 0), color in (false, true)
+        buf = IOBuffer()
+        io = IOContext(buf, :color => color, :displaysize => (24, 100))
+        p = P._progress(n, "Testing"; unit="kb", enabled=true, io=io)
+        p.tty = true
+        P._render(p)
+        p.tlast = 0.0; P._next!(p; info="first")
+        p.tlast = 0.0; P._update!(p, 3; info="three")
+        P._finish!(p; info="done", ok=color)
+        P._finish!(p)
+        out = String(take!(buf))
+        @test occursin("Testing", out) && occursin("done", out) && occursin("\r", out)
+    end
+    q = P._progress(3, "Off"; enabled=false, io=devnull)
+    @test P._next!(q) === q && P._update!(q, 2) === q && P._finish!(q) === q
+    @test P._secs(0.5) == "500 ms" && P._secs(125.0) == "2 min 5 s" && P._secs(7300.0) == "2 h 2 min"
+    @test P._fmt(-1234567) == "-1,234,567" && P._fmt(3.0) == "3" && P._fmt(0.25) == "0.25"
+    @test P._g(NaN) == "NaN" && P._g(Inf) == "Inf" && P._g(-Inf) == "-Inf" && P._g(0.0) == "0"
+end
+
 # All local paths summed explicitly (log-sum-exp), including D_k → E exits,
 # which Forward counts though they never win in Viterbi.
 function exhaustive_forward(h, xs)
