@@ -1,5 +1,6 @@
 # ProfileHMMs.jl
 
+[![Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://EvoArt.github.io/ProfileHMMs.jl/dev/)
 [![CI](https://github.com/EvoArt/ProfileHMMs.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/EvoArt/ProfileHMMs.jl/actions/workflows/CI.yml?query=branch%3Amain)
 [![Coverage](https://codecov.io/gh/EvoArt/ProfileHMMs.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/EvoArt/ProfileHMMs.jl)
 
